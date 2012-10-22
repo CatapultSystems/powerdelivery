@@ -23,8 +23,12 @@ Param (
 	[String]
 	$workspaceName,
 	[String]
-	$environment
+	$environment,
+    [String]
+    $pipelineDB
 )
+
+$env:PSModulePath += ";.\PowerShellModules"
 
 $appVersion = '1.0.0'
 
@@ -49,4 +53,4 @@ function TestAcceptance() {
 function TestCapacity() {
 }
 
-. '.\PowerShellModules\ContinuousDelivery.ps1'
+.\PowerShellModules\ContinuousDelivery.ps1
