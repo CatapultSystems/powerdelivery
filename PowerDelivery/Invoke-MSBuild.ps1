@@ -1,17 +1,76 @@
+<#
+.Synopsis
+Compiles a project using msbuild.exe.
+
+.Description
+The Invoke-MSBuild cmdlet is used to compile a MSBuild-compatible project or solution. You should always use this cmdlet instead of a direct call to msbuild.exe or existing cmdlets you may have found online when working with powerdelivery.
+
+This cmdlet provides the following essential continuous delivery features:
+
+Updates the version of any AssemblyInfo.cs (or AssemblyInfo.vb) files with the current build version. This causes all of your binaries to have the build number. For example, if your build pipeline's version in the script is set to 1.0.2 and this is a build against changeset C234, the version of your assemblies will be set to 1.0.2.234.
+
+Automatically targets a build configuration matching the environment name ("Commit", "Test", or "Production"). Create build configurations named "Commit", "Test", and "Production" with appropriate settings in your projects for this to work. If you don't want this, you'll have to explicitly pass the configuration as a parameter.
+
+Reports the status of the compilation back to TFS to be viewed in the build summary. This is important because it allows tests run using mstest.exe to have their run results associated with the compiled assets created using this cmdlet.
+
+.Example
+Invoke-MSBuild MyProject/MySolution.sln -properties  @{MyCustomProp = SomeValue}
+
+.Parameter projectFile
+A relative path at or below the script directory that specifies an MSBuild project or solution to compile.
+
+.Parameter properties
+Optional. A PowerShell hash containing name/value pairs to set as MSBuild properties.
+
+.Parameter target
+Optional. The name of the MSBuild target to invoke in the project file. Defaults to the default target specified within the project file.
+
+.Parameter toolsVersion
+Optional. The version of MSBuild to run ("2.0", "3.5", "4.0", etc.). The default is "4.0".
+
+.Parameter verbosity
+Optional. The verbosity of this MSBuild compilation. The default is "m".
+
+.Parameter buildConfiguration
+Optional. The default is to use the same as the environment name. Create build configurations named "Commit", "Test", and "Production" with appropriate settings in your projects.
+
+.Parameter flavor
+Optional. The platform configuration (x86, x64 etc.) of this MSBuild complation. The default is "AnyCPU".
+
+.Parameter ignoreProjectExtensions
+Optional. A semicolon-delimited list of project extensions (".smproj;.csproj" etc.) of projects in the solution to not compile.
+
+.Parameter dotNetVersion
+Optional. The .NET version to use for compilation. Defaults to the version specified in the project file(s) being built.
+#>
 function Invoke-MSBuild {
     [CmdletBinding()]
     param(
         [Parameter(Position=0,Mandatory=1)][string] $projectFile, 
-        [Parameter(Mandatory=0)] $properties, 
-        [Parameter(Mandatory=0)][string] $target, 
-        [Parameter(Mandatory=0)][string] $toolsVersion, 
-        [Parameter(Mandatory=0)][string] $verbosity = "m", 
-        [Parameter(Mandatory=0)][string] $buildConfiguration = "Debug", 
-        [Parameter(Mandatory=0)][string] $flavor = "AnyCPU", 
-        [Parameter(Mandatory=0)][string] $ignoreProjectExtensions, 
-        [Parameter(Mandatory=0)][string] $dotNetVersion = "4.0"
+        [Parameter(Position=1,Mandatory=0)] $properties = @{}, 
+        [Parameter(Position=2,Mandatory=0)][string] $target, 
+        [Parameter(Position=3,Mandatory=0)][string] $toolsVersion, 
+        [Parameter(Position=4,Mandatory=0)][string] $verbosity = "m", 
+        [Parameter(Position=5,Mandatory=0)][string] $buildConfiguration, 
+        [Parameter(Position=6,Mandatory=0)][string] $flavor = "AnyCPU", 
+        [Parameter(Position=7,Mandatory=0)][string] $ignoreProjectExtensions, 
+        [Parameter(Position=8,Mandatory=0)][string] $dotNetVersion = "4.0"
     )
+	
+	if ([String]::IsNullOrWhiteSpace($buildConfiguration)) {
+	
+		if ((Get-BuildEnvironment) -eq 'Local') {
+			$buildConfiguration = 'Debug'
+		}
+		else {
+			$buildConfiguration = 'Release'
+		}
 
+		if (!$properties.ContainsKey('Configuration')) {
+			$properties.Add('Configuration', $buildConfiguration)
+		}
+	}
+	
 	$dropLocation = Get-BuildDropLocation
 	$logFolder = Join-Path $dropLocation "Logs"
 	mkdir -Force $logFolder | Out-Null
@@ -24,15 +83,13 @@ function Invoke-MSBuild {
     $msBuildCommand = "& ""$msbuildExe"""
     $msBuildCommand += " ""/nologo"""
 
-    if ($properties -ne $null) {
-        if ($properties.length -gt 0) {
-            
-            $properties.Keys | % {
-                $msBuildCommand += " ""/p:$($_)=$($properties.Item($_))"""
-            }
+    if ($properties.length -gt 0) {
+        
+        $properties.Keys | % {
+            $msBuildCommand += " ""/p:$($_)=$($properties.Item($_))"""
         }
     }
-
+	
     if ([string]::IsNullOrWhiteSpace($toolsVersion) -eq $false) {
         $msBuildCommand += " ""/tv:$toolsVersion"""
     }
@@ -49,14 +106,26 @@ function Invoke-MSBuild {
 		$msBuildCommand += " ""/T:$target"""
 	}
 	
-	$logFile = [IO.Path]::GetFileNameWithoutExtension($projectFile) + ".log"
+	$projectFileBase = [IO.Path]::GetFileNameWithoutExtension($projectFile)
+	$logFile = "$($projectFileBase).log"
 	
 	$msBuildCommand += " ""/l:FileLogger,Microsoft.Build.Engine;logfile=$logFile"""
+
+	<#
+	if ($powerdelivery.onServer) {
+		$outDir = Join-Path $currentDirectory "Binaries\$projectFileBase"
+		$msBuildCommand += " ""/p:TeamBuildOutDir=$outDir"""		
+	}
+	else {
+		$outDir = Join-Path $dropLocation "Binaries\$projectFileBase"
+		$msBuildCommand += " ""/p:OutDir=$outDir"""
+	}
+	#>
 
     $msBuildCommand += " ""$projectFile"""
 
 	Write-Host
-    "Compiling MSBuild Project:"
+    Write-Host "Compiling MSBuild Project:"
 	Write-ConsoleSpacer
 	Write-Host
 	
@@ -76,7 +145,7 @@ function Invoke-MSBuild {
 	if (![string]::IsNullOrWhiteSpace($target)) {
 		"Target: $target"
 	}
-
+	
 	$tableFormat = @{Expression={$_.Key};Label="Key";Width=50}, `
                    @{Expression={$_.Value};Label="Value";Width=75}
 
@@ -86,13 +155,16 @@ function Invoke-MSBuild {
 			$properties | Format-Table $tableFormat -HideTableHeaders
         }
     }
+	
+	$currentDirectory = Get-Location
 
     if (Get-BuildOnServer) {
 			
 		$fullProjectFile = [System.IO.Path]::Combine($currentDirectory, [System.IO.Path]::GetFileName($projectFile))
-	    Update-AssemblyInfoFiles -path ([System.IO.Path]::GetDirectoryName($fullProjectFile))
+		$shortPath = [System.IO.Path]::GetDirectoryName($fullProjectFile)
+		
+	    Update-AssemblyInfoFiles -path $shortPath
 	}
-
 
     try {
         Exec -errorMessage "Invocation of MSBuild project $projectFile failed." {
@@ -125,7 +197,7 @@ function Invoke-MSBuild {
 			$errorCount = 0
 			$warningCount = 0
 						
-			Get-Content $logFile | Where-Object {$_ -like "*error*"} | ForEach-Object { 
+			Get-Content $logFile | Where-Object {$_ -like "*error*"} | % { 
 				if ($_ -match "^.*(?=: error)") {
 					$errorCount++
 					
@@ -153,7 +225,7 @@ function Invoke-MSBuild {
 				}
 			}
 			
-			Get-Content $logFile | Where-Object {$_ -like "*warning*"} | ForEach-Object { 
+			Get-Content $logFile | Where-Object {$_ -like "*warning*"} | % { 
 				if ($_ -match "^.*(?=: warning)") {
 					$warningCount++
 					

@@ -62,6 +62,7 @@ local.properties
 *.vspscc
 .builds
 *.dotCover
+*.nupkg
 
 ## TODO: If you have NuGet Package Restore enabled, uncomment this
 #packages/
@@ -99,13 +100,25 @@ publish
 # Others
 [Bb]in
 [Oo]bj
+DeploymentPackage
+*BuildDrop
+*.zip
+TestResults
+packages
 sql
 TestResults
+*.trx
+*.log
+*.vssscc
 *.Cache
 ClientBin
 stylecop.*
 ~$*
 *.dbmdl
+Examples/**/jedwards*
+Examples/**/UnitTests
+Examples/**/AcceptanceTests
+Examples/**/WebSites
 Generated_Code #added for RIA/Silverlight projects
 
 # Backup & report files from converting an old project file to a newer

@@ -65,27 +65,13 @@ function Add-Pipeline {
 	        exit
 	    }
 
-	    function RequireParam($param, $switch) {
-	        if ([string]::IsNullOrWhiteSpace($param)) {
-	            Write-Error "$switch was not supplied"
-	            exit
-	        }
-	    }
-
-	    RequireParam -param $name -switch  "-name"
-	    RequireParam -param $template -switch  "-templateName"
-	    RequireParam -param $collection -switch  "-tfsCollectionUri"
-	    RequireParam -param $project -switch  "-tfsProjectName"
-	    RequireParam -param $vsVersion -switch "-vsVersion"
-	    RequireParam -param $controller -switch "-buildController"
-	    RequireParam -param $dropFolder -switch "-dropFolder"
-
 		LoadTFS -vsVersion $vsVersion
 
 	    $buildsDir = Join-Path -Path $curDir -ChildPath "Pipelines"
 	    $outBaseDir = Join-Path -Path $buildsDir -ChildPath $project
 
-	    del -Path $buildsDir -Force -Recurse | Out-Null
+        Remove-Item -Path $buildsDir -Force -Recurse -ErrorAction SilentlyContinue | Out-Null
+
 	    mkdir -Force $outBaseDir | Out-Null
 	    cd $buildsDir
 
@@ -116,14 +102,31 @@ function Add-Pipeline {
         $newScriptName = "$outBaseDir\$name.ps1"
 
         Move-Item -Path "$outBaseDir\Build.ps1" -Destination "$newScriptName" -Force
-        Move-Item -Path "$outBaseDir\BuildLocalEnvironment.csv" -Destination "$outBaseDir\$($name)LocalEnvironment.csv" -Force
-        Move-Item -Path "$outBaseDir\BuildCommitEnvironment.csv" -Destination "$outBaseDir\$($name)CommitEnvironment.csv" -Force
-        Move-Item -Path "$outBaseDir\BuildTestEnvironment.csv" -Destination "$outBaseDir\$($name)TestEnvironment.csv" -Force
-        Move-Item -Path "$outBaseDir\BuildCapacityTestEnvironment.csv" -Destination "$outBaseDir\$($name)CapacityTestEnvironment.csv" -Force
-        Move-Item -Path "$outBaseDir\BuildProductionEnvironment.csv" -Destination "$outBaseDir\$($name)ProductionEnvironment.csv" -Force
-
+		
+		$buildDictionary = @{
+            "$name - Local" = "Local";
+            "$name - Commit" = "Commit";
+            "$name - Test" = "Test";
+            "$name - Capacity Test" = "CapacityTest";
+            "$name - Production" = "Production";
+        }
+		
+		$envExtensions = @(".yml", ".csv")
+		
+		$buildDictionary.Values | % {
+			$envName = $_
+			$envExtensions | % {
+				$envExtension = $_
+				$sourcePath = "$outBaseDir\Build$($envName)Environment$($envExtension)"
+				$destPath = "$outBaseDir\$($name)$($envName)Environment$($envExtension)"
+				if (Test-Path $sourcePath) {
+					Move-Item -Force $sourcePath $destPath
+				}
+			}
+		}
+		
         "Replacing build template variables..."
-        (Get-Content "$newScriptName") | Foreach-Object {
+        (Get-Content "$newScriptName") | % {
             $_ -replace '%BUILD_NAME%', $name
         } | Set-Content "$newScriptName"
 
@@ -137,7 +140,7 @@ function Add-Pipeline {
         $buildServer = $projectCollection.GetService([Microsoft.TeamFoundation.Build.Client.IBuildServer])
         $structure = $projectCollection.GetService([Microsoft.TeamFoundation.Server.ICommonStructureService])
 
-		$buildServerVersion = $powerdelivery.buildServer.BuildServerVersion
+		$buildServerVersion = $buildServer.BuildServerVersion
 				
 		if ($buildServerVersion -eq 'v3') {
 			$powerdelivery.tfsVersion = '2010'
@@ -155,108 +158,103 @@ function Add-Pipeline {
             exit
         }
 
-        $buildDictionary = @{
-            "$name - Commit" = "Commit";
-            "$name - Test" = "Test";
-            "$name - Capacity Test" = "CapacityTest";
-            "$name - Production" = "Production";
-        }
-
         $buildDictionary.GETENUMERATOR() | % {
             $buildName = $_.Key
             $buildEnv = $_.Value
 
             $build = $null
 
-            try {
-                $build = $buildServer.GetBuildDefinition($project, $buildName)
-                "Found build $buildName, updating..."
-            }
-            catch {
-                "Creating build $buildName..."
-            
-                $build = $buildServer.CreateBuildDefinition($project)
-            }
-            
-            $build.Name = $buildName
-
-            if ($buildName.EndsWith("Commit")) {
-                $build.ContinuousIntegrationType = [Microsoft.TeamFoundation.Build.Client.ContinuousIntegrationType]::Individual
-            }
-            else {
-                $build.ContinuousIntegrationType = [Microsoft.TeamFoundation.Build.Client.ContinuousIntegrationType]::None
-            }
-
-            $build.BuildController = $buildServer.GetBuildController($controller)
-
-            $buildFound = $false
-
-		    $processTemplatePath = "`$/$project/BuildProcessTemplates/PowerDeliveryTemplate.xaml"
-            $changeSetTemplatePath = "`$/$project/BuildProcessTemplates/PowerDeliveryChangeSetTemplate.xaml"
-
-		    if ($powerdelivery.tfsVersion -eq 2012) {
-        	    $processTemplatePath = "`$/$project/BuildProcessTemplates/PowerDeliveryTemplate.11.xaml"
-			    $changeSetTemplatePath = "`$/$project/BuildProcessTemplates/PowerDeliveryChangeSetTemplate.11.xaml"
-		    }
-
-            $processTemplates = $buildServer.QueryProcessTemplates($project)
-
-            foreach ($processTemplate in $processTemplates) {
-                if ($processTemplate.ServerPath -eq $processTemplatePath -and $buildEnv -eq "Commit") {
-                    $build.Process = $processTemplate
-                    $buildFound = $true
-                    break
+            if ($buildEnv -ne 'Local') {
+                try {
+                    $build = $buildServer.GetBuildDefinition($project, $buildName)
+                    "Found build $buildName, updating..."
                 }
-                elseif ($processTemplate.ServerPath -eq $changeSetTemplatePath -and $buildEnv -ne "Commit") {
-                    $build.Process = $processTemplate
-                    $buildFound = $true
-                    break
+                catch {
+                    "Creating build $buildName..."
+            
+                    $build = $buildServer.CreateBuildDefinition($project)
                 }
-            }
+            
+                $build.Name = $buildName
 
-            $build.DefaultDropLocation = $dropFolder
-
-            if (!$buildFound) {
-
-                if ($buildEnv -eq "Commit") {
-                    $templateToCreate = $processTemplatePath
+                if ($buildName.EndsWith("Commit")) {
+                    $build.ContinuousIntegrationType = [Microsoft.TeamFoundation.Build.Client.ContinuousIntegrationType]::Individual
                 }
                 else {
-                    $templateToCreate = $changeSetTemplatePath
+                    $build.ContinuousIntegrationType = [Microsoft.TeamFoundation.Build.Client.ContinuousIntegrationType]::None
                 }
 
-                "Creating build process template for $templateToCreate..."
-                $processTemplate = $buildServer.CreateProcessTemplate($project, $templateToCreate)
-                $processTemplate.TemplateType = [Microsoft.TeamFoundation.Build.Client.ProcessTemplateType]::Custom
-                "Saving process template..."
-                $processTemplate.Save()
-                "Done"
+                $build.BuildController = $buildServer.GetBuildController($controller)
 
-                if ($processTemplate -eq $null) {
-                    throw "Couldn't find a process template at $templateToCreate"
+                $buildFound = $false
+
+		        $processTemplatePath = "`$/$project/BuildProcessTemplates/PowerDeliveryTemplate.xaml"
+                $changeSetTemplatePath = "`$/$project/BuildProcessTemplates/PowerDeliveryChangeSetTemplate.xaml"
+
+		        if ($powerdelivery.tfsVersion -eq 2012) {
+        	        $processTemplatePath = "`$/$project/BuildProcessTemplates/PowerDeliveryTemplate.11.xaml"
+			        $changeSetTemplatePath = "`$/$project/BuildProcessTemplates/PowerDeliveryChangeSetTemplate.11.xaml"
+		        }
+
+                $processTemplates = $buildServer.QueryProcessTemplates($project)
+
+                foreach ($processTemplate in $processTemplates) {
+                    if ($processTemplate.ServerPath -eq $processTemplatePath -and $buildEnv -eq "Commit") {
+                        $build.Process = $processTemplate
+                        $buildFound = $true
+                        break
+                    }
+                    elseif ($processTemplate.ServerPath -eq $changeSetTemplatePath -and $buildEnv -ne "Commit") {
+                        $build.Process = $processTemplate
+                        $buildFound = $true
+                        break
+                    }
                 }
-                $build.Process = $processTemplate
-            }
 
-            $processParams = [Microsoft.TeamFoundation.Build.Workflow.WorkflowHelpers]::DeserializeProcessParameters($build.ProcessParameters)
-            $processParams["Environment"] = $buildEnv        
-            $scriptPath = "`$/$project/$($name).ps1"
-            $processParams["PowerShellScriptPath"] = $scriptPath
+                $build.DefaultDropLocation = $dropFolder
+
+                if (!$buildFound) {
+
+                    if ($buildEnv -eq "Commit") {
+                        $templateToCreate = $processTemplatePath
+                    }
+                    else {
+                        $templateToCreate = $changeSetTemplatePath
+                    }
+
+                    "Creating build process template for $templateToCreate..."
+                    $processTemplate = $buildServer.CreateProcessTemplate($project, $templateToCreate)
+                    $processTemplate.TemplateType = [Microsoft.TeamFoundation.Build.Client.ProcessTemplateType]::Custom
+                    "Saving process template..."
+                    $processTemplate.Save()
+                    "Done"
+
+                    if ($processTemplate -eq $null) {
+                        throw "Couldn't find a process template at $templateToCreate"
+                    }
+                    $build.Process = $processTemplate
+                }
+
+                $processParams = [Microsoft.TeamFoundation.Build.Workflow.WorkflowHelpers]::DeserializeProcessParameters($build.ProcessParameters)
+                $processParams["Environment"] = $buildEnv        
+                $scriptPath = "`$/$project/$($name).ps1"
+                $processParams["PowerShellScriptPath"] = $scriptPath
         
-            $build.ProcessParameters = [Microsoft.TeamFoundation.Build.Workflow.WorkflowHelpers]::SerializeProcessParameters($processParams)
+                $build.ProcessParameters = [Microsoft.TeamFoundation.Build.Workflow.WorkflowHelpers]::SerializeProcessParameters($processParams)
 
-            $build.Save()
+                $build.Save()
+            }
         }
 
         $groupSecurity = $projectCollection.GetService([Microsoft.TeamFoundation.Server.IGroupSecurityService])
         $appGroups = $groupSecurity.ListApplicationGroups($projectInfo.Uri)
 
-        $buildDictionary.Values | ForEach-Object {
+        $buildDictionary.Values | % {
             $envName = $_
-            if ($envName -ne 'Commit') {
+            if ($envName -ne 'Commit' -and $envName -ne 'Local') {
                 $groupName = "$name $envName Builders"
                 $group = $null
-                $appGroups | ForEach-Object {
+                $appGroups | % {
                     if ($_.AccountName -eq $groupName) {
                         $group = $_
                     }

@@ -1,0 +1,8 @@
+DatabaseServer: localhost
+DatabaseName: PowerDeliveryASPNETMVC4_Commit
+WebServer: localhost
+WebPort: "8082"
+WebSite: PowerDeliveryASPNETMVC4_Commit
+WebURL: "http://localhost:8082"
+UnitTestsPath: UnitTests\PowerDeliveryASPNETMVC4.Tests.dll
+BuildConfiguration: Release

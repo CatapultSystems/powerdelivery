@@ -34,12 +34,16 @@ Optional. The platform configuration (x86, x64 etc.) of the project compiled usi
 function Invoke-MSTest {
     [CmdletBinding()]
     param(
-        [Parameter(Position=0,Mandatory=1)][string] $list, 
-        [Parameter(Position=1,Mandatory=1)][string] $results, 
-		[Parameter(Position=2,Mandatory=1)][string] $vsmdi, 
-        [Parameter(Position=3,Mandatory=1)][string] $settings, 
-        [Parameter(Position=4,Mandatory=0)][string] $platform = 'AnyCPU'
+		[Parameter(Position=0,Mandatory=1)][string] $file,
+		[Parameter(Position=1,Mandatory=1)][string] $results,
+		[Parameter(Position=2,Mandatory=1)][string] $category,
+        [Parameter(Position=3,Mandatory=0)][string] $platform = 'AnyCPU',
+		[Parameter(Position=4,Mandatory=0)][string] $buildConfiguration
     )
+	
+	if ([String]::IsNullOrWhiteSpace($buildConfiguration)) {
+		$buildConfiguration = Get-BuildEnvironment
+	}
 
     $currentDirectory = Get-Location
 	$environment = Get-BuildEnvironment
@@ -49,13 +53,14 @@ function Invoke-MSTest {
 	$dropResults = "$dropLocation\$results"
 
 	try {
+		rm -ErrorAction SilentlyContinue -Force $localResults | Out-Null
+	
         # Run acceptance tests out of local directory
-        Exec -errorMessage "Error running tests in list $list using $vsmdi" {
-            mstest /testmetadata:"$currentDirectory\$vsmdi" `
-                   /testlist:"$list" `
-                   /testsettings:"$currentDirectory\$settings" `
-                   /resultsfile:"$localResults" `
-                   /usestderr /nologo
+		$command = "mstest /testcontainer:""$currentDirectory\$file"" /category:""$category"" /resultsfile:""$localResults"""
+		$command += " /usestderr /nologo"
+		
+        Exec -errorMessage "Error running tests in $file" {
+			Invoke-Expression $command
         }
     }
     finally {
@@ -65,14 +70,16 @@ function Invoke-MSTest {
 
             # Publish acceptance test results for this build to the TFS server
             Exec -errorMessage "Error publishing test results for $dropResults" {
-                mstest /publish:"$(Get-CollectionUri)" `
+                mstest /publish:"$(Get-BuildCollectionUri)" `
                        /teamproject:"$(Get-BuildTeamProject)" `
                        /publishbuild:"$(Get-BuildName)" `
                        /publishresultsfile:"$dropResults" `
-                       /flavor:$environment `
+                       /flavor:$buildConfiguration `
                        /platform:$platform `
 					   /nologo
             }
+			
+			Write-BuildSummaryMessage -name "TestUnits" -header "Unit Tests" -message "MSTest: $file -> $results"
         }
     }
 }

@@ -1,131 +1,18 @@
-function InvokePowerDeliveryModuleHook($blockName, $stage) {
-	$global:g_powerdelivery_delivery_modules | ForEach-Object {
-		$moduleName = $_
-		$functionName = "Invoke-$($moduleName)DeliveryModule$stage$blockName"
-		if (Get-Command $functionName -ErrorAction SilentlyContinue) {
-			& $functionName
-			return $true
-		}
-	}
-	return $false
-}
+<#
+.Synopsis
+Runs a continuous delivery build script using powerdelivery.
 
-function InvokePowerDeliveryBuildAction($condition, $stage, $description, $status, $blockName) {
-	if ($condition) {
-		$actionPerformed = $false
-		
-		Write-Host
-		"$status..."
-    	Write-ConsoleSpacer
-    	Write-Host
-		
-		try {
-			if (InvokePowerDeliveryModuleHook $blockName 'Pre') {
-				$actionPerformed = $true
-			}
-		    if ($stage) {
-	        	& $stage
-				$actionPerformed = $true
-			}			
-			if (InvokePowerDeliveryModuleHook $blockName 'Post') {
-				$actionPerformed = $true
-			}
-			
-			$message = "No actions performed."
-			
-			if ($actionPerformed) {
-				$message = "Successful."
-			}
+.Description
+Runs a continuous delivery build script using powerdelivery. You should only ever
+specify the first parameter of this function when running this function on your own 
+computer. All other parameters are used by the TFS server.
 
-			if ($blockName -ne 'Init') {
-				Write-BuildSummaryMessage -name $blockName -header $description -message $message
-			}
-		}
-		finally {
-		   	Set-Location $powerdelivery.currentLocation
-		}
-	}
-}
+.Example
+Invoke-PowerDelivery .\MyProduct.ps1
 
-function Init {
-	[CmdletBinding()]
-	param([Parameter(Position=0, Mandatory=1)][scriptblock] $action)
-	
-	$powerdelivery.init = $action
-}
-
-function Compile {
-	[CmdletBinding()]
-	param([Parameter(Position=0, Mandatory=1)][scriptblock] $action)
-	
-	$powerdelivery.compile = $action
-}
-
-function Deploy {
-	[CmdletBinding()]
-	param([Parameter(Position=0, Mandatory=1)][scriptblock] $action)
-	
-	$powerdelivery.deploy = $action
-}
-
-function SetupEnvironment {
-	[CmdletBinding()]
-	param([Parameter(Position=0, Mandatory=1)][scriptblock] $action)
-	
-	$powerdelivery.setupEnvironment = $action
-}
-
-function TestEnvironment {
-	[CmdletBinding()]
-	param([Parameter(Position=0, Mandatory=1)][scriptblock] $action)
-	
-	$powerdelivery.testEnvironment = $action
-}
-
-function TestUnits {
-	[CmdletBinding()]
-	param([Parameter(Position=0, Mandatory=1)][scriptblock] $action)
-	
-	$powerdelivery.testUnits = $action
-}
-
-function TestAcceptance {
-	[CmdletBinding()]
-	param([Parameter(Position=0, Mandatory=1)][scriptblock] $action)
-	
-	$powerdelivery.testAcceptance = $action
-}
-
-function TestCapacity {
-	[CmdletBinding()]
-	param([Parameter(Position=0, Mandatory=1)][scriptblock] $action)
-	
-	$powerdelivery.testCapacity = $action
-}
-
-function Pipeline {
-	[CmdletBinding()]
-	param(
-		[Parameter(Position=0, Mandatory=1)][string] $scriptName,
-		[Parameter(Mandatory=1)][string] $version
-	)
-	
-	$powerdelivery.pipeline = $this
-	$powerdelivery.scriptName = $scriptName
-
-	$buildAppVersion = "$appVersion"
-	
-    if ($environment -ne 'local') {
-	    $changeSetNumber = $powerdelivery.changeSet.Substring(1)
-	    $buildAppVersion = "$version." + $changeSetNumber
-    }
-	else {
-		$buildAppVersion = $version
-	}
-
-    $powerdelivery.buildAppVersion = $buildAppVersion
-}
-
+.Parameter buildScript
+The relative path to to a local powerdelivery build script to run.
+#>
 function Invoke-Powerdelivery {
     [CmdletBinding()]
     param(
@@ -144,10 +31,132 @@ function Invoke-Powerdelivery {
 	
 	$ErrorActionPreference = 'Stop'
 
+	function InvokePowerDeliveryModuleHook($blockName, $stage) {
+		$actionPerformed = $false
+		$powerdelivery.moduleHooks["$stage$blockName"] | % { 
+			& $_ 
+			$actionPerformed = $true
+		}
+		$powerdelivery.hookResult = $actionPerformed
+	}
+
+	function InvokePowerDeliveryBuildAction($condition, $stage, $description, $status, $blockName) {
+		if ($condition) {
+			$actionPerformed = $false
+			
+			Write-Host
+			"$status..."
+	    	Write-ConsoleSpacer
+	    	Write-Host
+			
+			try {
+				if ($blockName -eq "Init") {
+					$chocolateyPackages = "packages.config"
+					if (Test-Path $chocolateyPackages) {
+						Exec -errorMessage "Error installing chocolatey packages" {
+							cinst $chocolateyPackages
+						}
+					}
+				}
+				InvokePowerDeliveryModuleHook $blockName 'Pre'
+				if ($powerdelivery.hookResult) {
+					$actionPerformed = $true
+				}
+			    if ($stage) {
+		        	& $stage
+					$actionPerformed = $true
+				}			
+				if ($blockName -eq "Compile") {
+					$yamlConfig = Get-BuildModuleConfig
+					$assetOperations = $yamlConfig.Assets
+
+					if ($assetOperations) {
+						$assetOperations.Keys | % {
+							$invokeArgs = @{}
+
+							$assetOperation = $assetOperations[$_]
+							
+							if ($assetOperation.Path) {
+								$invokeArgs.Add('path', $assetOperation.Path)
+							}
+							if ($assetOperation.Destination) {
+								$invokeArgs.Add('destination', $assetOperation.Destination)
+							}
+							if ($assetOperation.Filter) {
+								$invokeArgs.Add('filter', $assetOperation.Filter)
+							}
+							if ($assetOperation.Recurse) {
+								$invokeArgs.Add('Recurse', $true)
+							}
+							& Publish-BuildAssets @invokeArgs	
+						}
+					}
+				}
+				InvokePowerDeliveryModuleHook $blockName 'Post'
+				if ($powerdelivery.hookResult) {
+					$actionPerformed = $true
+				}
+				
+				$message = "No actions performed."
+				
+				if ($actionPerformed) {
+					$message = "Successful."
+				}
+			}
+			finally {
+			   	Set-Location $powerdelivery.currentLocation
+			}
+		}
+	}
+	
+	function ReplaceModuleConfigSettings($yamlNodes) {
+		if ($yamlNodes.Keys) {
+			$replacedValues = @{}
+			$yamlNodes.Keys | % {
+				$yamlNode = $yamlNodes[$_]			
+				if ($yamlNode.GetType().Name -eq 'Hashtable') {
+					ReplaceModuleConfigSettings($yamlNode)
+				}
+				else {
+					$matches = Select-String "\<<.*?\>>" -InputObject $yamlNode -AllMatches | Foreach {$_.Matches}
+					$replacedValue = $yamlNode
+					$matches | Foreach { 
+						$envSettingName = $_.Value.Substring(2, $_.Length - 4)
+						$envSettingValue = [String]::Empty
+						try {
+							$envSettingValue = Get-BuildSetting $envSettingName
+						}
+						catch {
+							$errorMessage = $_.Exception.Message
+							throw "Error replacing setting in module configuration file: $errorMessage"
+						}
+						$replacedValue = $replacedValue -replace $_, $envSettingValue
+					}
+					$replacedValues.Add($_, $replacedValue)
+				}
+			}
+			$replacedValues.GetEnumerator() | Foreach {
+				$yamlNodes[$_.Name] = $_.Value
+			}
+		}
+	}
+
     if (!$dropLocation.EndsWith('\')) {
 	    $dropLocation = "$($dropLocation)\"
     }
+	
+	$powerdelivery.moduleHooks = @{
+		"PreInit" = @(); "PostInit" = @();
+		"PreCompile" = @(); "PostCompile" = @();
+		"PreSetupEnvironment" = @(); "PostSetupEnvironment" = @();
+		"PreTestEnvironment" = @(); "PostTestEnvironment" = @();
+		"PreDeploy" = @(); "PostDeploy" = @();
+		"PreTestAcceptance" = @(); "PostTestAcceptance" = @();
+		"PreTestUnits" = @(); "PostTestUnits" = @();
+		"PreTestCapacity" = @(); "PostTestCapacity" = @()
+	}
 
+	$powerdelivery.deliveryModules = @()
     $powerdelivery.assemblyInfoFiles = @()
     $powerdelivery.currentLocation = gl
     $powerdelivery.noReleases = $true
@@ -166,7 +175,8 @@ function Invoke-Powerdelivery {
 	$powerdelivery.priorBuild = $priorBuild
 
     Write-Host
-    "powerdelivery - https://github.com/eavonius/powerdelivery"
+	$powerdelivery.version = Get-Module powerdelivery | select version | ForEach-Object { $_.Version.ToString() }
+    "powerdelivery $($powerdelivery.version) - https://github.com/eavonius/powerdelivery"
 	Write-Host
 	$appScript = [System.IO.Path]::GetFileNameWithoutExtension($buildScript)
 
@@ -204,8 +214,7 @@ function Invoke-Powerdelivery {
 
 		        $powerdelivery.projectInfo = $powerdelivery.structure.GetProjectFromName($teamProject)
 		        if (!$powerdelivery.projectInfo) {
-		            Write-Error "Project '$teamProject' not found in TFS collection '$collectionUri'"
-		            exit
+		            throw "Project '$teamProject' not found in TFS collection '$collectionUri'"
 		        }
 				
 				$powerdelivery.groupSecurity = $powerdelivery.collection.GetService([Microsoft.TeamFoundation.Server.IGroupSecurityService])
@@ -217,16 +226,34 @@ function Invoke-Powerdelivery {
 			$currentDirectory = Get-Location
 			$powerdelivery.dropLocation = [System.IO.Path]::Combine($currentDirectory, "$($appScript)BuildDrop")
 			mkdir $powerdelivery.dropLocation -Force | Out-Null
+			$dropLocation = $powerdelivery.dropLocation
 	    }
 		
-		$envConfigFileName = $appScript + $environment + "Environment.csv"
+		$envConfigFileName = "$($appScript)$($environment)Environment"
+		$modulesConfigFileName = "$($appScript)Modules.yml"
+		$yamlFile = "$($envConfigFileName).yml"
+		$csvFile = "$($envConfigFileName).csv"
 
-	    if (Test-Path -Path $envConfigFileName) {
-		    $powerdelivery.envConfig = Import-Csv $envConfigFileName	
+		$powerdelivery.is_yaml = $true
+
+	    if (Test-Path -Path $yamlFile) {
+			$yamlPath = (Resolve-Path ".\$($yamlFile)")
+			$powerdelivery.yamlConfig = Get-Yaml -FromFile $yamlPath
+			$powerdelivery.envConfig = $powerdelivery.yamlConfig
 	    }
-	    else {
+	    elseif (Test-Path -Path $csvFile) {
+			$powerdelivery.is_yaml = $false
+			$powerdelivery.envConfig = Import-Csv $csvFile
+		}
+		else {
 		    throw "Build configuration file $envConfigFileName not found."
 	    }
+		
+		if (Test-Path -Path $modulesConfigFileName) {
+			$yamlPath = (Resolve-Path ".\$($modulesConfigFileName)")
+			$powerdelivery.moduleConfig = Get-Yaml -FromFile $yamlPath			
+			ReplaceModuleConfigSettings($powerdelivery.moduleConfig)
+		}
 		
 		Invoke-Expression -Command ".\$appScript"
 		
@@ -292,13 +319,25 @@ function Invoke-Powerdelivery {
         $powerdelivery.envConfig | Format-Table $tableFormat -HideTableHeaders
       
         $envMessage = @()
-        $powerdelivery.envConfig | ForEach-Object {
-            $value = $_.Value
-            if ($_.Name.EndsWith("Password")) {
-                $value = '********'
-            }
-            $envMessage += "$($_.Name): $value"
-        }
+		
+		if ($powerdelivery.is_yaml) {
+			foreach ($envKey in $powerdelivery.envConfig.Keys) {
+				$envValue = $powerdelivery.envConfig[$envKey]
+				if ($envKey.EndsWith("Password")) {
+	                $envValue = '********'
+	            }
+	            $envMessage += "$($envKey): $envValue"
+			}
+		}
+		else {
+	        $powerdelivery.envConfig | % {
+	            $value = $_.Value
+	            if ($_.Name.EndsWith("Password")) {
+	                $value = '********'
+	            }
+	            $envMessage += "$($_.Name): $value"
+	        }
+		}
 
         $envMessage = ($envMessage -join "`n")
 
@@ -306,9 +345,24 @@ function Invoke-Powerdelivery {
 
 		"Delivery Modules"
 		Write-ConsoleSpacer
-		$powerdelivery.deliveryModulesFolder = Join-Path $powerdelivery.currentLocation "$($appScript)DeliveryModules"
 
-		$global:g_powerdelivery_delivery_modules | Format-Table $tableFormat -HideTableHeaders
+		if ($powerdelivery.deliveryModules) {
+			$deliveryModules = @()
+			$powerdelivery.deliveryModules | ForEach-Object {
+				$moduleVersion = $null
+				try {
+					$moduleVersion = Get-Module "$($_)DeliveryModule" | select version | ForEach-Object { $_.Version.ToString() }
+				}
+				catch { }
+				$moduleString = $_
+				if ($moduleVersion) {
+					$moduleString = "$($_) ($moduleVersion)"
+				}
+				$deliveryModules += $moduleString
+				Write-BuildSummaryMessage -name "DeliveryModules" -header "Delivery Modules"  -message $moduleString
+			}
+			$deliveryModules -join ", "
+		}
 
 		if ($powerdelivery.environment -ne "Commit" -and $powerdelivery.onServer -eq $true) {
 
@@ -323,7 +377,7 @@ function Invoke-Powerdelivery {
 			
 			$requestingIdentity = $powerdelivery.groupSecurity.ReadIdentity($accountNameSearchFactor, $powerdelivery.requestedBy, $expandedQueryMembership)
 			
-			$powerdelivery.appGroups | ForEach-Object {
+			$powerdelivery.appGroups | % {
                 if (($_.AccountName.ToLower() -eq $groupName.ToLower()) -and $buildGroup -eq $null) {
 					$buildGroup = $_
 					$groupMembers = $powerdelivery.groupSecurity.ReadIdentities($sidSearchFactor, $buildGroup.Sid, $expandedQueryMembership)					
@@ -369,17 +423,17 @@ function Invoke-Powerdelivery {
 
 		InvokePowerDeliveryBuildAction -condition $true -stage $powerdelivery.init -description "Initialization" -status "Initializing" -blockName "Init"
 	    InvokePowerDeliveryBuildAction -condition ($powerdelivery.environment -eq 'Commit' -or $powerdelivery.environment -eq 'Local') -stage $powerdelivery.compile -description "Compilations" -status "Compiling" -blockName "Compile"
-	    InvokePowerDeliveryBuildAction -condition ($powerdelivery.environment -eq 'Commit' -or $powerdelivery.environment -eq 'Local') -stage $powerdelivery.testUnits -description "Unit Tests" -status "Testing Units" -blockName "TestUnits"
-		
-		$projectCollection = $null
-	    $buildServer = $null
-	    $structure = $null
-
-	    if ($powerdelivery.environment -ne "Local" -and $powerdelivery.environment -ne "Commit" -and $powerdelivery.onServer) {
+	    
+		if ($powerdelivery.environment -ne "Local" -and $powerdelivery.environment -ne "Commit" -and $powerdelivery.onServer) {
 	        $priorBuildDrop = $powerdelivery.priorBuild.DropLocation
+			"Cloning deployed assets from prior build..."
 	        Copy-Item -Path "$priorBuildDrop\*" -Recurse -Destination $powerdelivery.dropLocation
 	    }
-
+		
+		"Copying deployed assets locally..."	
+		Copy-Item -Force -Path "$($powerdelivery.dropLocation)\*" -Recurse -Destination $powerdelivery.currentLocation
+		
+		InvokePowerDeliveryBuildAction -condition ($powerdelivery.environment -eq 'Commit' -or $powerdelivery.environment -eq 'Local') -stage $powerdelivery.testUnits -description "Unit Tests" -status "Testing Units" -blockName "TestUnits"
 	    InvokePowerDeliveryBuildAction -condition $true -stage $powerdelivery.setupEnvironment -description "Environment Changes" -status "Setting Up Environment" -blockName "SetupEnvironment"
 	    InvokePowerDeliveryBuildAction -condition $true -stage $powerdelivery.deploy -description "Deployments" -status "Deploying" -blockName "Deploy"
 	    InvokePowerDeliveryBuildAction -condition $true -stage $powerdelivery.testEnvironment -description "Environment Tests" -status "Testing Environment" -blockName "TestEnvironment"
@@ -393,4 +447,204 @@ function Invoke-Powerdelivery {
 	    Write-Host "Build Failed!" -ForegroundColor Red
 		throw
     }
+}
+
+<#
+.Synopsis
+Contains code that will execute during the Init stage of the delivery pipeline build script.
+
+.Description
+Contains code that will execute during the Init stage of the delivery pipeline build script.
+
+.Parameter action
+The block of script containing the code to execute.
+
+.Example
+Init { DoStuff() }
+#>
+function Init {
+	[CmdletBinding()]
+	param([Parameter(Position=0, Mandatory=1)][scriptblock] $action)
+	
+	$powerdelivery.init = $action
+}
+
+<#
+.Synopsis
+Contains code that will execute during the Compile stage of the delivery pipeline build script.
+
+.Description
+Contains code that will execute during the Compile stage of the delivery pipeline build script.
+
+.Parameter action
+The block of script containing the code to execute.
+
+.Example
+Compile { DoStuff() }
+#>
+function Compile {
+	[CmdletBinding()]
+	param([Parameter(Position=0, Mandatory=1)][scriptblock] $action)
+	
+	$powerdelivery.compile = $action
+}
+
+<#
+.Synopsis
+Contains code that will execute during the Deploy stage of the delivery pipeline build script.
+
+.Description
+Contains code that will execute during the Deploy stage of the delivery pipeline build script.
+
+.Parameter action
+The block of script containing the code to execute.
+
+.Example
+Deploy { DoStuff() }
+#>
+function Deploy {
+	[CmdletBinding()]
+	param([Parameter(Position=0, Mandatory=1)][scriptblock] $action)
+	
+	$powerdelivery.deploy = $action
+}
+
+<#
+.Synopsis
+Contains code that will execute during the SetupEnvironment stage of the delivery pipeline build script.
+
+.Description
+Contains code that will execute during the SetupEnvironment stage of the delivery pipeline build script.
+
+.Parameter action
+The block of script containing the code to execute.
+
+.Example
+SetupEnvironment { DoStuff() }
+#>
+function SetupEnvironment {
+	[CmdletBinding()]
+	param([Parameter(Position=0, Mandatory=1)][scriptblock] $action)
+	
+	$powerdelivery.setupEnvironment = $action
+}
+
+<#
+.Synopsis
+Contains code that will execute during the TestEnvironment stage of the delivery pipeline build script.
+
+.Description
+Contains code that will execute during the TestEnvironment stage of the delivery pipeline build script.
+
+.Parameter action
+The block of script containing the code to execute.
+
+.Example
+TestEnvironment { DoStuff() }
+#>
+function TestEnvironment {
+	[CmdletBinding()]
+	param([Parameter(Position=0, Mandatory=1)][scriptblock] $action)
+	
+	$powerdelivery.testEnvironment = $action
+}
+
+<#
+.Synopsis
+Contains code that will execute during the TestUnits stage of the delivery pipeline build script.
+
+.Description
+Contains code that will execute during the TestUnits stage of the delivery pipeline build script.
+
+.Parameter action
+The block of script containing the code to execute.
+
+.Example
+TestUnits { DoStuff() }
+#>
+function TestUnits {
+	[CmdletBinding()]
+	param([Parameter(Position=0, Mandatory=1)][scriptblock] $action)
+	
+	$powerdelivery.testUnits = $action
+}
+
+<#
+.Synopsis
+Contains code that will execute during the TestAcceptance stage of the delivery pipeline build script.
+
+.Description
+Contains code that will execute during the TestAcceptance stage of the delivery pipeline build script.
+
+.Parameter action
+The block of script containing the code to execute.
+
+.Example
+TestAcceptance { DoStuff() }
+#>
+function TestAcceptance {
+	[CmdletBinding()]
+	param([Parameter(Position=0, Mandatory=1)][scriptblock] $action)
+	
+	$powerdelivery.testAcceptance = $action
+}
+
+<#
+.Synopsis
+Contains code that will execute during the TestCapacity stage of the delivery pipeline build script.
+
+.Description
+Contains code that will execute during the TestCapacity stage of the delivery pipeline build script.
+
+.Parameter action
+The block of script containing the code to execute.
+
+.Example
+TestCapacity { DoStuff() }
+#>
+function TestCapacity {
+	[CmdletBinding()]
+	param([Parameter(Position=0, Mandatory=1)][scriptblock] $action)
+	
+	$powerdelivery.testCapacity = $action
+}
+
+<#
+.Synopsis
+Declares a continous delivery pipeline at the top of a powerdelivery build script.
+
+.Description
+Declares a continous delivery pipeline at the top of a powerdelivery build script.
+
+.Parameter scriptName
+The name of the script being executed. Should match the .ps1 filename (without extension).
+
+.Parameter version
+The version of the product being delivered. Should include 3 version specifiers (e.g. 1.0.5)
+
+.Example
+Pipeline "MyApp" -Version "1.0.5"
+#>
+function Pipeline {
+	[CmdletBinding()]
+	param(
+		[Parameter(Position=0, Mandatory=1)][string] $scriptName,
+		[Parameter(Mandatory=1)][string] $version
+	)
+	
+	$powerdelivery.pipeline = $this
+	$powerdelivery.buildAssemblyVersion = $version
+	$powerdelivery.scriptName = $scriptName
+
+	$buildAppVersion = "$appVersion"
+	
+    if ($environment -ne 'local') {
+	    $changeSetNumber = $powerdelivery.changeSet.Substring(1)
+	    $buildAppVersion = "$version." + $changeSetNumber
+    }
+	else {
+		$buildAppVersion = $version
+	}
+
+    $powerdelivery.buildAppVersion = $buildAppVersion
 }
